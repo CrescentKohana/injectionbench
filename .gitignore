@@ -1,0 +1,6 @@
+/injectionbench
+/dist/
+/results/
+*.test
+/coverage.out
+.env
