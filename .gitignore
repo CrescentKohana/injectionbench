@@ -4,3 +4,5 @@
 *.test
 /coverage.out
 .env
+/vulnerable.json
+/hardened.json

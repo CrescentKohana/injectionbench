@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "$out"
+            exit 1
+          fi
+      - run: go test -race -count=1 ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.2
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 # pinned release
+      - run: actionlint
+
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        run: go build -o injectionbench ./cmd/injectionbench
+
+      - name: Run vulnerable benchmark
+        run: ./injectionbench run --target builtin:vulnerable --llm sim --judge canary --trials 20 --seed 1 --format json --output vulnerable.json
+
+      - name: Run hardened benchmark
+        run: ./injectionbench run --target builtin:hardened --llm sim --judge canary --trials 20 --seed 1 --format json --output hardened.json
+
+      - name: Hardened must not regress vs vulnerable
+        shell: bash
+        run: |
+          set -o pipefail
+          ./injectionbench compare --baseline vulnerable.json --current hardened.json --format markdown | tee vulnerable-vs-hardened.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hardened must be significantly better than vulnerable
+        shell: bash
+        run: |
+          set -o pipefail
+          code=0
+          ./injectionbench compare --baseline hardened.json --current vulnerable.json --alpha 0.01 --format json > reverse-direction.json || code=$?
+          if [ "$code" -ne 1 ]; then
+            echo "expected compare to exit exactly 1 (hardened significantly better than vulnerable), got exit code $code"
+            cat reverse-direction.json
+            exit 1
+          fi
+          regressed="$(jq -r '.rows[] | select(.scope == "overall") | .regressed' reverse-direction.json)"
+          if [ "$regressed" != "true" ]; then
+            echo "expected the overall row's regressed field to be true, got $regressed"
+            cat reverse-direction.json
+            exit 1
+          fi
+          {
+            echo '```json'
+            cat reverse-direction.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Regression gate against committed baseline
+        shell: bash
+        run: |
+          set -o pipefail
+          ./injectionbench compare --baseline benchmarks/baseline-hardened.json --current hardened.json --format markdown | tee regression-gate.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate the canary judge against the shipped labels
+        shell: bash
+        run: |
+          set -o pipefail
+          ./injectionbench validate-judges --labels datasets/judge-labels.jsonl --judge canary --format text | tee judge-validation.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: injectionbench-reports
+          path: |
+            vulnerable.json
+            hardened.json
+            vulnerable-vs-hardened.md
+            reverse-direction.json
+            regression-gate.md
+            judge-validation.txt
